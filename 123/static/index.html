@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Single-image → 3D viewer</title>
+  <style>body,html{height:100%;margin:0} #canvas{width:100%;height:100%} #ui{position:fixed;left:10px;top:10px;z-index:10;background:rgba(255,255,255,0.9);padding:8px;border-radius:6px}</style>
+</head>
+<body>
+  <div id="ui">
+    <input id="file" type="file" accept="image/*"/>
+    <button id="send">生成 3D 模型</button>
+    <div id="status"></div>
+    <img id="preview" style="max-width:200px;display:block;margin-top:8px"/>
+  </div>
+  <div id="canvas"></div>
+
+  <!-- three.js + loaders from CDN -->
+  <script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.158.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://unpkg.com/three@0.158.0/examples/js/loaders/GLTFLoader.js"></script>
+
+  <script>
+  const fileInput = document.getElementById("file");
+  const sendBtn = document.getElementById("send");
+  const status = document.getElementById("status");
+  const previewImg = document.getElementById("preview");
+
+  let currentBase64 = null;
+  fileInput.addEventListener("change", e=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    const reader = new FileReader();
+    reader.onload = ()=> {
+      currentBase64 = reader.result;
+      previewImg.src = currentBase64;
+    }
+    reader.readAsDataURL(f);
+  });
+
+  sendBtn.addEventListener("click", async ()=>{
+    if(!currentBase64){ alert("請先選擇圖片"); return;}
+    status.innerText = "上傳圖片到後端並建立模型任務中 ...";
+    try {
+      const res = await fetch("/tripo", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({image_base64: currentBase64})
+      });
+      const j = await res.json();
+      if(!res.ok) throw new Error(j.error || JSON.stringify(j));
+      status.innerText = "模型建立完成，載入中 ...";
+      if(j.preview){
+        // 某些回傳是 URL 或 物件
+        const previewUrl = (typeof j.preview === "string") ? j.preview : (j.preview.url || "");
+        if(previewUrl) previewImg.src = previewUrl;
+      }
+      if(!j.model_url) throw new Error("no model_url returned");
+      await loadModelToThree(j.model_url);
+      status.innerText = "模型載入完成。";
+    } catch(err){
+      console.error(err);
+      status.innerText = "錯誤: " + (err.message || err);
+    }
+  });
+
+  // three.js viewer
+  let scene, camera, renderer, controls, container;
+  function initThree(){
+    container = document.getElementById("canvas");
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0,1.2,2.5);
+    renderer = new THREE.WebGLRenderer({antialias:true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    container.innerHTML = "";
+    container.appendChild(renderer.domElement);
+
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(5, 10, 7.5);
+    scene.add(dir);
+
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.target.set(0,1,0);
+
+    window.addEventListener("resize", ()=>{
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    animate();
+  }
+  function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+  }
+
+  async function loadModelToThree(modelUrl){
+    // 清除場景舊物件
+    for(let i = scene.children.length -1;i>=0;i--){
+      const o = scene.children[i];
+      if(o.type !== "AmbientLight" && o.type !== "HemisphereLight" && o.type !== "DirectionalLight"){
+        scene.remove(o);
+      }
+    }
+    // 以 GLTFLoader 嘗試載入（若是 obj 等請換 loader）
+    return new Promise((resolve, reject)=>{
+      const loader = new THREE.GLTFLoader();
+      loader.crossOrigin = "";
+      loader.load(modelUrl, gltf=>{
+        const root = gltf.scene || gltf.scenes[0];
+        // 簡單縮放與置中
+        const box = new THREE.Box3().setFromObject(root);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if(maxDim > 0){
+          const scale = 1.0 / maxDim;
+          root.scale.setScalar(scale);
+        }
+        box.setFromObject(root);
+        const center = box.getCenter(new THREE.Vector3());
+        root.position.multiplyScalar(-1).add(new THREE.Vector3(0, -center.y, 0));
+        scene.add(root);
+        resolve();
+      }, xhr=>{
+        // progress
+      }, err=>{
+        reject(err);
+      });
+    });
+  }
+
+  initThree();
+  </script>
+</body>
+</html>
